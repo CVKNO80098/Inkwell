@@ -6,5 +6,5 @@ build/
 
 # CI 临时产物
 stage/
-Inkwell-*.zip
+*.zip
 sha256.txt
