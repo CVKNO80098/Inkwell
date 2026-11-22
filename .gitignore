@@ -3,3 +3,8 @@ dist/
 
 # 忽略build目录
 build/
+
+# CI 临时产物
+stage/
+Inkwell-*.zip
+sha256.txt

@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: 'Submit the build to SignPath for code signing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: windows-2022
+
+    env:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+      SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG || 'inkwell' }}
+      SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+      SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG || 'inkwell-exe' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Ensure .NET Framework 4.7.2 targeting pack
+        shell: pwsh
+        run: |
+          $ref = Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2'
+          if (-not (Test-Path $ref)) {
+            Write-Host "v4.7.2 reference assemblies not found; installing dev pack..."
+            choco install netfx-4.7.2-devpack -y --no-progress
+          }
+          if (-not (Test-Path $ref)) { throw "v4.7.2 reference assemblies are still missing: $ref" }
+
+      - name: Build solution
+        shell: pwsh
+        run: |
+          msbuild Inkwell.sln /m /p:Configuration=Release /p:Platform="Any CPU" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+
+      - name: Run parser tests
+        shell: pwsh
+        run: |
+          & .\build\vs-tests\Tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path src\App\App.cs -Pattern 'Version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $m) { throw 'Could not read App.Version from src\App\App.cs' }
+          $appVersion = $m.Matches[0].Groups[1].Value
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($tagVersion -ne $appVersion) {
+              throw "Tag $env:GITHUB_REF_NAME does not match App.Version $appVersion. Bump App.Version before tagging."
+            }
+          }
+
+          "version=$appVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Check SignPath configuration
+        shell: pwsh
+        run: |
+          $hasToken = -not [string]::IsNullOrWhiteSpace($env:SIGNPATH_API_TOKEN)
+          $hasOrg   = -not [string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)
+          if (-not ($hasToken -and $hasOrg)) {
+            if ($env:GITHUB_REF_TYPE -eq 'tag') {
+              throw 'SIGNPATH_API_TOKEN and SIGNPATH_ORGANIZATION_ID are required for tag releases. See docs/CI-SIGNING.md.'
+            }
+            Write-Warning 'SignPath secrets are not configured; this run will publish an unsigned build.'
+          }
+
+      - name: Stage portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item build\vs\Inkwell.exe stage\Inkwell.exe
+          Copy-Item README.md stage\README.md
+          New-Item -ItemType File -Path stage\portable.txt -Force | Out-Null
+          Copy-Item docs stage\docs -Recurse
+          # SignPath uses a CA-trusted certificate, so the self-signed instructions do not apply.
+          Remove-Item stage\docs\自签名证书说明.md -ErrorAction SilentlyContinue
+
+      # SignPath needs the unsigned artifact stored as a GitHub Actions artifact.
+      # archive:false keeps it as a single PE file instead of a ZIP.
+      - name: Upload unsigned executable
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-unsigned-exe
+          path: stage/Inkwell.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: Submit SignPath signing request
+        id: signpath
+        if: ${{ env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_ORGANIZATION_ID != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.sign != 'false') }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ env.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+          skip-decompress: true
+
+      - name: Verify signature and use signed executable
+        if: ${{ steps.signpath.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Path signed -Filter *.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $signed) { throw 'SignPath did not return Inkwell.exe' }
+
+          Copy-Item $signed.FullName stage\Inkwell.exe -Force
+          $sig = Get-AuthenticodeSignature stage\Inkwell.exe
+          "Signer: $($sig.SignerCertificate.Subject)"
+          "Status: $($sig.Status)"
+          if ($sig.Status -ne 'Valid') {
+            throw "Signature verification failed: $($sig.Status) - $($sig.StatusMessage)"
+          }
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          $zip = "Inkwell-$env:VERSION.zip"
+          Compress-Archive -Path stage\* -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content sha256.txt -Encoding ascii
+          Get-Item $zip, sha256.txt | Select-Object Name, Length
+
+      - name: Upload signed package
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-release
+          path: |
+            Inkwell-${{ env.VERSION }}.zip
+            sha256.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Inkwell v${{ env.VERSION }}
+          files: |
+            Inkwell-${{ env.VERSION }}.zip
+            sha256.txt
+          generate_release_notes: true

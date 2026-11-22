@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for Inkwell.
+
+  The release workflow uploads the unsigned executable with
+  actions/upload-artifact@v4 and `archive: false`, so SignPath receives a
+  single PE file (not a ZIP). The root element is therefore the pe-file
+  itself; no inner path is needed.
+
+  Upload this file in SignPath (Project → Artifact Configurations) and use
+  the slug configured in the SIGNPATH_ARTIFACT_CONFIGURATION_SLUG variable.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <pe-file>
+    <authenticode-sign />
+  </pe-file>
+</artifact-configuration>

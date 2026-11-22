@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (net472)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Ensure .NET Framework 4.7.2 targeting pack
+        shell: pwsh
+        run: |
+          $ref = Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2'
+          if (-not (Test-Path $ref)) {
+            Write-Host "v4.7.2 reference assemblies not found; installing dev pack..."
+            choco install netfx-4.7.2-devpack -y --no-progress
+          }
+          if (-not (Test-Path $ref)) { throw "v4.7.2 reference assemblies are still missing: $ref" }
+          msbuild -version
+
+      - name: Build solution
+        shell: pwsh
+        run: |
+          msbuild Inkwell.sln /m /p:Configuration=Release /p:Platform="Any CPU" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+
+      - name: Run parser tests
+        shell: pwsh
+        run: |
+          & .\build\vs-tests\Tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
+
+      - name: Stage portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item build\vs\Inkwell.exe stage\Inkwell.exe
+          Copy-Item README.md stage\README.md
+          New-Item -ItemType File -Path stage\portable.txt -Force | Out-Null
+          Copy-Item docs stage\docs -Recurse
+          Compress-Archive -Path stage\* -DestinationPath Inkwell-unsigned.zip -Force
+          Get-Item Inkwell-unsigned.zip | Select-Object Name, Length
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-unsigned
+          path: Inkwell-unsigned.zip
+          if-no-files-found: error

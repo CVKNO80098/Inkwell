@@ -223,3 +223,4 @@ public sealed class App : Application
         Shutdown();
     }
 }
+

@@ -181,9 +181,18 @@ Get-ChildItem Cert:\CurrentUser\Root, Cert:\CurrentUser\TrustedPublisher |
 - 购买 OV/EV 代码签名证书（公开分发的正解）；
 - 接受每次新版本首次运行时点「更多信息 → 仍要运行」，或由用户自行在系统里关闭 SmartScreen 的应用检查（不推荐）。
 
+## 自动化构建与签名
+
+仓库带两个 GitHub Actions 工作流：
+
+- `.github/workflows/build.yml`：`push` / `pull_request` 时用 MSBuild 构建 Release、运行解析器测试，并上传未签名 zip。
+- `.github/workflows/release.yml`：推送 `v*` 标签时构建、测试、调用 [SignPath](https://signpath.io/) 做 CA 代码签名、校验签名、生成 zip/`sha256.txt` 并创建 GitHub Release。
+
+签名配置、Secrets 与发版步骤见 **[docs/CI-SIGNING.md](docs/CI-SIGNING.md)**。签名后的 exe 会显示真实发布者；在 SignPath 审核通过前，仍可使用上一节的自签名证书。
+
 ## 更新记录
 
-- **1.0.6**：单页模式重新隐藏代码围栏，只显示带内边距的格式化代码块（光标移到围栏行才会显示）；语法高亮扩展为关键字 / 类型 / 函数 / 字符串 / 数字 / 注释 / 标签 / 属性 / 运算符多色方案，新增 Go、Rust、TOML、Dockerfile 等语言。同时提供自签名构建（`Inkwell-selfsigned.cer`），仅用于本机/内部信任。
+- **1.0.6**：单页模式重新隐藏代码围栏，只显示带内边距的格式化代码块（光标移到围栏行才会显示）；语法高亮扩展为关键字 / 类型 / 函数 / 字符串 / 数字 / 注释 / 标签 / 属性 / 运算符多色方案，新增 Go、Rust、TOML、Dockerfile 等语言。同时提供自签名构建（`Inkwell-selfsigned.cer`），仅用于本机/内部信任。仓库新增 GitHub Actions 构建与 SignPath 代码签名流程。
 - **1.0.5**：状态栏右下角新增分栏 / 编辑 / 预览 / 单页切换按钮；预览改为输入时持续刷新；单页模式下代码围栏（```）保持可见，代码块显示更完整。
 - **1.0.4**：新增单页（所见即所得）模式；修复 `Ctrl+X` 剪切失效与整篇剪切时的崩溃；重写输入路径的脏检查、字数统计与撤销快照，逐键开销降到亚毫秒级；中文输入法组词期间不再触发重排；预览渲染按文档大小自适应延迟。
 - **1.0.3**：修复预览中斜体不生效（`*斜体*` 被当作普通文本）。
