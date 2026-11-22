@@ -1,0 +1,5 @@
+# 忽略产出目录
+dist/
+
+# 忽略build目录
+build/
